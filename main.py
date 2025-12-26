@@ -1,4 +1,18 @@
 # main.py
+
+#chash handler
+import faulthandler, sys, traceback
+faulthandler.enable(all_threads=True)
+
+def logCrash(excType, exc, tb):
+    with open("crash.log", "w", encoding="utf-8") as f:
+        f.write("".join(traceback.format_exception(excType, exc, tb)))
+
+sys.excepthook = logCrash
+
+
+
+#imports
 import sys
 import time
 
@@ -10,7 +24,7 @@ from PyQt6.QtCore import QTimer
 
 from db import Db
 from capture import GlobalCapture, CaptureConfig
-
+#UI Drawing
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -30,13 +44,17 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         self.userLabelInput = QLineEdit()
-        self.userLabelInput.setPlaceholderText("User label (e.g., Dakarai / Participant1)")
+        self.userLabelInput.setPlaceholderText("User label")
         row1.addWidget(self.userLabelInput)
         layout.addLayout(row1)
 
         self.privacyModeCheckbox = QCheckBox("Privacy mode (do NOT store key identities)")
         self.privacyModeCheckbox.setChecked(True)
         layout.addWidget(self.privacyModeCheckbox)
+
+        self.keyboardCaptureCheckbox = QCheckBox("Enable keyboard capture (may crash on macOS 15)")
+        self.keyboardCaptureCheckbox.setChecked(True)
+        layout.addWidget(self.keyboardCaptureCheckbox)
 
         self.startButton = QPushButton("Start capture (system-wide)")
         self.stopButton = QPushButton("Stop capture")
@@ -56,32 +74,50 @@ class MainWindow(QMainWindow):
         self.refreshTimer = QTimer()
         self.refreshTimer.setInterval(500)
         self.refreshTimer.timeout.connect(self.refreshCounts)
-
+    #startCapture
     def startCapture(self):
-        userLabel = self.userLabelInput.text().strip()
-        if not userLabel:
-            QMessageBox.warning(self, "Missing user label", "Please enter a user label before starting.")
-            return
+        try:
+            userLabel = self.userLabelInput.text().strip()
+            if not userLabel:
+                QMessageBox.warning(self, "Missing user label", "Please enter a user label before starting.")
+                return
 
-        self.sessionStartedAt = time.time()
-        self.sessionId = self.db.startSession(
-            userLabel=userLabel,
-            mode="global",
-            startedAt=self.sessionStartedAt
-        )
+            self.sessionStartedAt = time.time()
+            self.sessionId = self.db.startSession(userLabel=userLabel, mode="global", startedAt=self.sessionStartedAt)
+            #capture configration (Set the capture rate)
+            cfg = CaptureConfig(
+                privacyMode=self.privacyModeCheckbox.isChecked(),
+                mouseMoveSampleHz=20.0,
+                enableKeyboard=self.keyboardCaptureCheckbox.isChecked(),
+            )
+            self.capture = GlobalCapture(self.db, self.sessionId, cfg)
 
-        cfg = CaptureConfig(
-            privacyMode=self.privacyModeCheckbox.isChecked(),
-            mouseMoveSampleHz=50.0
-        )
-        self.capture = GlobalCapture(self.db, self.sessionId, cfg)
-        self.capture.start()
+            self.capture.start()
 
-        self.statusLabel.setText(f"Status: Capturing (session {self.sessionId})")
-        self.startButton.setEnabled(False)
-        self.stopButton.setEnabled(True)
-        self.refreshTimer.start()
+            self.statusLabel.setText(f"Status: Capturing (session {self.sessionId})")
+            self.startButton.setEnabled(False)
+            self.stopButton.setEnabled(True)
+            self.refreshTimer.start()
 
+        except Exception as e:
+            # fail gracefully (and keep session consistent)
+            try:
+                if self.capture:
+                    self.capture.stop()
+            except Exception:
+                pass
+            try:
+                if self.sessionId is not None:
+                    self.db.endSession(self.sessionId, time.time())
+            except Exception:
+                pass
+
+            QMessageBox.critical(self, "Capture failed", f"{type(e).__name__}: {e}")
+            self.capture = None
+            self.sessionId = None
+            self.sessionStartedAt = None
+
+    #clean up after the user dicedes to stop capturing 
     def stopCapture(self):
         if self.capture:
             self.capture.stop()
@@ -117,7 +153,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         event.accept()
-
+#main
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()

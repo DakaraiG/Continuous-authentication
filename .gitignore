@@ -1,3 +1,11 @@
 auth_log.db
 __pycache__/capture.cpython-310.pyc
 __pycache__/db.cpython-310.pyc
+__pycache__/capture.cpython-311.pyc
+.gitignore
+.gitignore
+__pycache__/db.cpython-314.pyc
+__pycache__/db.cpython-311.pyc
+.gitignore
+crash.log
+__pycache__/capture.cpython-314.pyc
