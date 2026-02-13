@@ -1,7 +1,8 @@
 # train_model.py
 # Trains authentication models for continuous auth
 # Supports one-class (enrolled user only) and binary (enrolled + impostor) modes
-# Can be run from command line or called from the app UI
+#
+# v2 - better hyperparameters, training data filtering, improved score calibration
 
 import pickle
 import numpy as np
@@ -22,10 +23,10 @@ from features import extractAllFeatures, featureDictToVector, FEATURE_NAMES
 def buildOneClassDataset(enrolledUser, dbPath="auth_log.db"):
     """
     Build dataset for one-class training (only enrolled user data needed).
-    Returns feature matrix X for the enrolled user only.
+    Filters out low-quality windows automatically via the minEvents param in features.
     """
     print(f"Extracting features for enrolled user: {enrolledUser}")
-    allData = extractAllFeatures(dbPath)
+    allData = extractAllFeatures(dbPath, minEvents=10)
 
     X = []
     for userLabel, featDict in allData:
@@ -38,17 +39,22 @@ def buildOneClassDataset(enrolledUser, dbPath="auth_log.db"):
         return None
 
     X = np.array(X)
-    print(f"Dataset: {len(X)} enrolled windows")
+
+    # remove any rows that are all zeros (completely empty windows that slipped through)
+    rowSums = np.sum(np.abs(X), axis=1)
+    validMask = rowSums > 0
+    X = X[validMask]
+
+    print(f"Dataset: {len(X)} usable enrolled windows")
     return X
 
 
 def buildBinaryDataset(enrolledUser, dbPath="auth_log.db"):
     """
     Build dataset for binary classification (needs enrolled + impostor data).
-    Returns X, y where y=1 is enrolled, y=0 is impostor.
     """
     print(f"Extracting features for enrolled user: {enrolledUser}")
-    allData = extractAllFeatures(dbPath)
+    allData = extractAllFeatures(dbPath, minEvents=10)
 
     if len(allData) == 0:
         return None, None
@@ -74,55 +80,73 @@ def buildBinaryDataset(enrolledUser, dbPath="auth_log.db"):
 
 class OneClassModel:
     """
-    Wraps a one-class classifier so it has a similar interface to sklearn pipelines.
-    Trains on enrolled user data only and flags anything different as anomalous.
+    Wraps a one-class classifier with proper score calibration.
+    Trains on enrolled user data only and flags anomalies.
+    
+    The key improvement here is better score normalisation - we use
+    the full training distribution rather than just percentiles so
+    the confidence scores are more meaningful.
     """
     def __init__(self, modelType="iforest"):
         self.modelType = modelType
         self.scaler = StandardScaler()
         self.model = None
-        self.scoreMin = None
-        self.scoreMax = None
+        self.scoreMean = None
+        self.scoreStd = None
 
     def fit(self, X):
         """Train on enrolled user data only."""
         xScaled = self.scaler.fit_transform(X)
 
         if self.modelType == "ocsvm":
-            self.model = OneClassSVM(kernel="rbf", gamma="scale", nu=0.1)
+            # nu controls the upper bound on training errors and lower bound on support vectors
+            # lower nu = tighter boundary around normal data
+            self.model = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05)
         else:
-            # isolation forest - contamination is how much noise we expect in training data
+            # isolation forest
+            # lower contamination = assume less noise in training data
+            # more estimators = more stable predictions
             self.model = IsolationForest(
-                n_estimators=100, contamination=0.05, random_state=42
+                n_estimators=200,
+                contamination=0.03,
+                max_features=0.8,  # use subset of features per tree for diversity
+                random_state=42,
             )
 
         self.model.fit(xScaled)
 
-        # get score range so we can normalise to 0-1 later
+        # calibrate scores using the training distribution
+        # using mean/std gives a more stable normalisation than min/max or percentiles
         scores = self.model.decision_function(xScaled)
-        self.scoreMin = np.percentile(scores, 2)
-        self.scoreMax = np.percentile(scores, 98)
+        self.scoreMean = np.mean(scores)
+        self.scoreStd = np.std(scores)
 
         return self
 
     def predict_proba(self, X):
         """
-        Return probability-like scores mapped to 0-1.
-        Higher = more likely to be the enrolled user.
+        Return probability-like scores mapped to 0-1 range.
+        Uses z-score normalisation based on training distribution,
+        then sigmoid to squeeze into 0-1. This gives smoother and more
+        stable confidence values compared to min-max scaling.
         """
         xScaled = self.scaler.transform(X)
         rawScores = self.model.decision_function(xScaled)
 
-        # normalise to 0-1
-        normed = (rawScores - self.scoreMin) / (self.scoreMax - self.scoreMin + 1e-8)
+        # z-score normalise using training stats
+        zScores = (rawScores - self.scoreMean) / (self.scoreStd + 1e-8)
+
+        # sigmoid function to map to 0-1
+        # the * 1.5 stretches the sigmoid so small deviations dont all collapse to 0.5
+        normed = 1.0 / (1.0 + np.exp(-zScores * 1.5))
         normed = np.clip(normed, 0.0, 1.0)
 
-        # format like sklearn predict_proba: col0=impostor, col1=enrolled
+        # format like sklearn: col0=impostor, col1=enrolled
         probs = np.column_stack([1 - normed, normed])
         return probs
 
     def predict(self, X):
-        """Predict 1 (enrolled) or 0 (impostor)."""
+        """Predict 1 (enrolled) or 0 (anomaly)."""
         probs = self.predict_proba(X)
         return (probs[:, 1] >= 0.5).astype(int)
 
@@ -137,24 +161,33 @@ def trainOneClass(X, modelType="iforest"):
         modelName = "Isolation Forest"
 
     print(f"\nTraining {modelName} (one-class mode)...")
+    print(f"  Features: {len(FEATURE_NAMES)}")
+    print(f"  Training windows: {len(X)}")
 
     model = OneClassModel(modelType=modelType)
     model.fit(X)
 
-    # score distribution on training data for reference
+    # score distribution on training data
     probs = model.predict_proba(X)[:, 1]
     preds = model.predict(X)
     inliers = np.sum(preds == 1)
 
-    print(f"  Training scores - mean: {np.mean(probs):.3f}, std: {np.std(probs):.3f}")
+    print(f"  Training score distribution:")
+    print(f"    mean: {np.mean(probs):.3f}")
+    print(f"    std:  {np.std(probs):.3f}")
+    print(f"    min:  {np.min(probs):.3f}")
+    print(f"    max:  {np.max(probs):.3f}")
     print(f"  Inliers: {inliers}/{len(X)} ({100*inliers/len(X):.1f}%)")
 
     metrics = {
         "modelType": modelName,
         "mode": "one-class",
+        "featureCount": len(FEATURE_NAMES),
         "trainingWindows": len(X),
         "trainScoreMean": float(np.mean(probs)),
         "trainScoreStd": float(np.std(probs)),
+        "trainScoreMin": float(np.min(probs)),
+        "trainScoreMax": float(np.max(probs)),
         "inlierRate": float(inliers / len(X)),
     }
 
@@ -207,7 +240,6 @@ def trainBinary(X, y, modelType="rf"):
     print(f"  ROC-AUC: {rocAuc:.4f}")
     print(f"  EER: {eer:.4f}")
 
-    # final model on all data
     pipeline.fit(X, y)
 
     metrics = {
