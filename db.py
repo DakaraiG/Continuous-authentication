@@ -39,11 +39,26 @@ CREATE TABLE IF NOT EXISTS mouse_events (
   FOREIGN KEY(session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS policy_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  ts REAL NOT NULL,
+  event_type TEXT NOT NULL,       -- "inference" | "warning" | "alert"
+  confidence REAL,
+  consecutive_low INTEGER,
+  threshold_accept REAL,
+  threshold_challenge REAL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_key_session_ts
   ON key_events(session_id, ts);
 
 CREATE INDEX IF NOT EXISTS idx_mouse_session_ts
   ON mouse_events(session_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_policy_session_ts
+  ON policy_events(session_id, ts);
 """
 
 class Db:
@@ -94,6 +109,18 @@ class Db:
         self.conn.execute(
             "INSERT INTO mouse_events(session_id, ts, event_type, scroll_dx, scroll_dy) VALUES (?, ?, 'scroll', ?, ?)",
             (sessionId, ts, scrollDx, scrollDy),
+        )
+
+    def insertPolicyEvent(self, sessionId: int, ts: float, eventType: str,
+                          confidence: float, consecutiveLow: int,
+                          thresholdAccept: float, thresholdChallenge: float):
+        """Log an inference/policy event for later evaluation."""
+        self.conn.execute(
+            "INSERT INTO policy_events(session_id, ts, event_type, confidence, "
+            "consecutive_low, threshold_accept, threshold_challenge) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sessionId, ts, eventType, confidence, consecutiveLow,
+             thresholdAccept, thresholdChallenge),
         )
 
     def commit(self):

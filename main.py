@@ -22,7 +22,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox, QMessageBox,
-    QFileDialog, QGroupBox, QProgressBar, QComboBox
+    QFileDialog, QGroupBox, QProgressBar, QComboBox, QSpinBox,
+    QDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 
@@ -34,6 +35,47 @@ from train_model import (
     trainOneClass, trainBinary,
     saveModel, loadModel
 )
+
+
+class StepUpDialog(QDialog):
+    """
+    The step-up prompt that appears when suspicious activity is detected.
+    In a real system this would ask for a password or some other verification.
+    For the prototype it just asks the user to confirm their identity.
+    """
+    def __init__(self, consecutiveCount, confidence, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Identity Verification Required")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+
+        # warning icon and message
+        warningLabel = QLabel(
+            "⚠️ Unusual activity detected"
+        )
+        warningLabel.setStyleSheet("font-size: 18px; font-weight: bold; color: #F44336;")
+        warningLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(warningLabel)
+
+        infoLabel = QLabel(
+            f"The system has detected {consecutiveCount} consecutive windows of "
+            f"activity that don't match the enrolled user's behavioural profile.\n\n"
+            f"Latest confidence score: {confidence:.1f}%\n\n"
+            f"In a production system, this would trigger a secondary "
+            f"authentication challenge (e.g. password or biometric check)."
+        )
+        infoLabel.setWordWrap(True)
+        layout.addWidget(infoLabel)
+
+        # buttons
+        buttonBox = QDialogButtonBox()
+        self.confirmButton = buttonBox.addButton("I am the enrolled user", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.dismissButton = buttonBox.addButton("Dismiss", QDialogButtonBox.ButtonRole.RejectRole)
+        buttonBox.accepted.connect(self.accept)
+        buttonBox.rejected.connect(self.reject)
+        layout.addWidget(buttonBox)
 
 
 class MainWindow(QMainWindow):
@@ -52,6 +94,10 @@ class MainWindow(QMainWindow):
         # model stuff
         self.model = None
         self.modelMetrics = None
+
+        # policy state - tracks how many consecutive low-confidence windows weve seen
+        self.consecutiveLowWindows = 0
+        self.alertShowing = False  # prevents multiple alerts stacking up
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -96,7 +142,6 @@ class MainWindow(QMainWindow):
         trainGroup = QGroupBox("Model Training")
         trainLayout = QVBoxLayout(trainGroup)
 
-        # model type selection
         modelRow = QHBoxLayout()
         modelRow.addWidget(QLabel("Algorithm:"))
         self.modelTypeCombo = QComboBox()
@@ -124,6 +169,51 @@ class MainWindow(QMainWindow):
         trainLayout.addWidget(self.trainStatusLabel)
 
         layout.addWidget(trainGroup)
+
+        # ---- policy section ----
+        policyGroup = QGroupBox("Authentication Policy")
+        policyLayout = QVBoxLayout(policyGroup)
+
+        # accept threshold
+        acceptRow = QHBoxLayout()
+        acceptRow.addWidget(QLabel("Accept threshold (%):"))
+        self.acceptThresholdSpin = QSpinBox()
+        self.acceptThresholdSpin.setRange(1, 99)
+        self.acceptThresholdSpin.setValue(60)
+        self.acceptThresholdSpin.setToolTip(
+            "Confidence above this = user is accepted (green)"
+        )
+        acceptRow.addWidget(self.acceptThresholdSpin)
+        policyLayout.addLayout(acceptRow)
+
+        # challenge threshold
+        challengeRow = QHBoxLayout()
+        challengeRow.addWidget(QLabel("Challenge threshold (%):"))
+        self.challengeThresholdSpin = QSpinBox()
+        self.challengeThresholdSpin.setRange(1, 99)
+        self.challengeThresholdSpin.setValue(35)
+        self.challengeThresholdSpin.setToolTip(
+            "Confidence below this = suspicious activity (red)"
+        )
+        challengeRow.addWidget(self.challengeThresholdSpin)
+        policyLayout.addLayout(challengeRow)
+
+        # consecutive windows before alert
+        windowsRow = QHBoxLayout()
+        windowsRow.addWidget(QLabel("Consecutive low windows before alert:"))
+        self.consecutiveWindowsSpin = QSpinBox()
+        self.consecutiveWindowsSpin.setRange(1, 20)
+        self.consecutiveWindowsSpin.setValue(3)
+        self.consecutiveWindowsSpin.setToolTip(
+            "How many consecutive suspicious windows before triggering a step-up alert"
+        )
+        windowsRow.addWidget(self.consecutiveWindowsSpin)
+        policyLayout.addLayout(windowsRow)
+
+        self.policyStatusLabel = QLabel("Policy: inactive")
+        policyLayout.addWidget(self.policyStatusLabel)
+
+        layout.addWidget(policyGroup)
 
         # ---- inference section ----
         inferenceGroup = QGroupBox("Live Inference")
@@ -180,11 +270,9 @@ class MainWindow(QMainWindow):
         self.trainButton.setEnabled(False)
         self.trainStatusLabel.setText("Training in progress... please wait")
 
-        # run training in a thread so the UI stays responsive
         def doTraining():
             try:
                 if modelTypeData in ("iforest", "ocsvm"):
-                    # one-class mode - only need enrolled user data
                     X = buildOneClassDataset(userLabel, self.db.path.as_posix())
                     if X is None or len(X) < 5:
                         self.trainingFinished.emit(
@@ -192,11 +280,9 @@ class MainWindow(QMainWindow):
                             None, None
                         )
                         return
-
                     model, metrics = trainOneClass(X, modelType=modelTypeData)
 
                 else:
-                    # binary mode - needs impostor data too
                     X, y = buildBinaryDataset(userLabel, self.db.path.as_posix())
                     if X is None or len(X) < 10:
                         self.trainingFinished.emit(
@@ -204,7 +290,6 @@ class MainWindow(QMainWindow):
                             None, None
                         )
                         return
-
                     if len(np.unique(y)) < 2:
                         self.trainingFinished.emit(
                             "Binary mode needs data from both the enrolled user AND at least one impostor. "
@@ -212,7 +297,6 @@ class MainWindow(QMainWindow):
                             None, None
                         )
                         return
-
                     model, metrics = trainBinary(X, y, modelType=modelTypeData)
 
                 self.trainingFinished.emit("success", model, metrics)
@@ -225,11 +309,10 @@ class MainWindow(QMainWindow):
 
 
     def onTrainingFinished(self, status, model, metrics):
-        """Called when the training thread finishes (runs on the UI thread)."""
+        """Called when training thread finishes (runs on the UI thread)."""
         self.trainButton.setEnabled(True)
 
         if model is None:
-            # something went wrong
             self.trainStatusLabel.setText(status)
             if "Not enough" in status or "Binary mode" in status:
                 QMessageBox.warning(self, "Training issue", status)
@@ -241,7 +324,6 @@ class MainWindow(QMainWindow):
         self.modelMetrics = metrics
         self.saveModelButton.setEnabled(True)
 
-        # show a summary of what we trained
         modelType = metrics.get("modelType", "Unknown")
         mode = metrics.get("mode", "unknown")
 
@@ -266,16 +348,13 @@ class MainWindow(QMainWindow):
 
 
     def saveModelToFile(self):
-        """Save the current model to a file."""
         if self.model is None:
             return
-
         filePath, _ = QFileDialog.getSaveFileName(
             self, "Save model", "model.pkl", "Pickle files (*.pkl)"
         )
         if not filePath:
             return
-
         try:
             saveModel(self.model, self.modelMetrics, filePath)
             QMessageBox.information(self, "Saved", f"Model saved to {filePath}")
@@ -284,13 +363,11 @@ class MainWindow(QMainWindow):
 
 
     def loadModelFromFile(self):
-        """Load a previously saved model."""
         filePath, _ = QFileDialog.getOpenFileName(
             self, "Load model", "", "Pickle files (*.pkl);;All files (*)"
         )
         if not filePath:
             return
-
         try:
             model, metrics, featureNames = loadModel(filePath)
             self.model = model
@@ -300,17 +377,16 @@ class MainWindow(QMainWindow):
             modelType = metrics.get("modelType", "Unknown")
             mode = metrics.get("mode", "unknown")
             self.trainStatusLabel.setText(f"Loaded: {modelType} ({mode} mode)")
-
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
 
 
-    # ---- INFERENCE ----
+    # ---- INFERENCE + POLICY ----
 
     def runInference(self):
         """
         Run inference on the last 10 seconds of captured data.
-        Gets called by the inference timer every 10 seconds.
+        Applies the confidence-gated policy to decide what action to take.
         """
         if self.model is None or self.sessionId is None:
             return
@@ -333,6 +409,7 @@ class MainWindow(QMainWindow):
                 self.inferenceLogLabel.setText(
                     f"Last check: {time.strftime('%H:%M:%S')} - skipped ({totalEvents} events)"
                 )
+                # dont count idle windows against the user
                 return
 
             # run prediction
@@ -340,30 +417,114 @@ class MainWindow(QMainWindow):
             prob = self.model.predict_proba(featureVec)[0][1]
             confidence = prob * 100
 
-            # update UI
+            # get current threshold settings
+            acceptThreshold = self.acceptThresholdSpin.value()
+            challengeThreshold = self.challengeThresholdSpin.value()
+            maxConsecutive = self.consecutiveWindowsSpin.value()
+
+            # apply the confidence policy
+            if confidence >= acceptThreshold:
+                # user looks legit - reset the counter
+                self.consecutiveLowWindows = 0
+                policyState = "accepted"
+                colour = "#4CAF50"  # green
+                self.policyStatusLabel.setText(
+                    f"Policy: ✓ User accepted (score {confidence:.0f}% ≥ {acceptThreshold}%)"
+                )
+
+            elif confidence >= challengeThreshold:
+                # in the warning zone - not quite suspicious enough to alert
+                # but we keep an eye on it
+                self.consecutiveLowWindows = 0  # reset since its above challenge
+                policyState = "warning"
+                colour = "#FF9800"  # orange
+                self.policyStatusLabel.setText(
+                    f"Policy: ⚠ Elevated monitoring (score {confidence:.0f}%)"
+                )
+
+            else:
+                # below challenge threshold - this looks suspicious
+                self.consecutiveLowWindows += 1
+                policyState = "suspicious"
+                colour = "#F44336"  # red
+                self.policyStatusLabel.setText(
+                    f"Policy: 🚨 Suspicious ({self.consecutiveLowWindows}/{maxConsecutive} low windows)"
+                )
+
+            # log the policy event to the database for later analysis
+            self.db.insertPolicyEvent(
+                self.sessionId, now, policyState, confidence / 100.0,
+                self.consecutiveLowWindows, acceptThreshold / 100.0,
+                challengeThreshold / 100.0,
+            )
+
+            # update confidence display
             self.confidenceBar.setValue(int(confidence))
             self.confidenceLabel.setText(f"Confidence: {confidence:.1f}%")
-
-            # colour the bar based on confidence
-            if confidence >= 70:
-                colour = "#4CAF50"  # green
-            elif confidence >= 40:
-                colour = "#FF9800"  # orange
-            else:
-                colour = "#F44336"  # red
-
             self.confidenceBar.setStyleSheet(
                 f"QProgressBar::chunk {{ background-color: {colour}; }}"
             )
 
             self.inferenceLogLabel.setText(
                 f"Last check: {time.strftime('%H:%M:%S')} - "
-                f"score={confidence:.1f}%, events={totalEvents}"
+                f"score={confidence:.1f}%, events={totalEvents}, state={policyState}"
             )
+
+            # trigger step-up alert if weve hit the threshold
+            if self.consecutiveLowWindows >= maxConsecutive and not self.alertShowing:
+                self.triggerStepUpAlert(confidence)
 
         except Exception as e:
             self.inferenceLogLabel.setText(f"Inference error: {e}")
             print(f"Inference error: {e}")
+
+
+    def triggerStepUpAlert(self, confidence):
+        """
+        Show the step-up authentication prompt.
+        In a real system this would require the user to re-authenticate.
+        For the prototype we just show a dialog and log the event.
+        """
+        self.alertShowing = True
+
+        # log the alert event
+        self.db.insertPolicyEvent(
+            self.sessionId, time.time(), "alert", confidence / 100.0,
+            self.consecutiveLowWindows,
+            self.acceptThresholdSpin.value() / 100.0,
+            self.challengeThresholdSpin.value() / 100.0,
+        )
+        self.db.commit()
+
+        self.policyStatusLabel.setText("Policy: 🔒 STEP-UP AUTHENTICATION REQUIRED")
+
+        dialog = StepUpDialog(self.consecutiveLowWindows, confidence, parent=self)
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            # user confirmed their identity - reset the counter
+            self.consecutiveLowWindows = 0
+            self.policyStatusLabel.setText("Policy: ✓ Identity confirmed by user")
+
+            # log that the user confirmed
+            self.db.insertPolicyEvent(
+                self.sessionId, time.time(), "confirmed", confidence / 100.0,
+                0, self.acceptThresholdSpin.value() / 100.0,
+                self.challengeThresholdSpin.value() / 100.0,
+            )
+        else:
+            # user dismissed - keep monitoring but reset counter to avoid spamming
+            self.consecutiveLowWindows = 0
+            self.policyStatusLabel.setText("Policy: ⚠ Alert dismissed, monitoring continues")
+
+            self.db.insertPolicyEvent(
+                self.sessionId, time.time(), "dismissed", confidence / 100.0,
+                0, self.acceptThresholdSpin.value() / 100.0,
+                self.challengeThresholdSpin.value() / 100.0,
+            )
+
+        self.db.commit()
+        self.alertShowing = False
 
 
     # ---- CAPTURE ----
@@ -389,6 +550,10 @@ class MainWindow(QMainWindow):
             self.capture = GlobalCapture(self.db, self.sessionId, cfg)
             self.capture.start()
 
+            # reset policy state for new session
+            self.consecutiveLowWindows = 0
+            self.alertShowing = False
+
             self.statusLabel.setText(f"Status: Capturing (session {self.sessionId})")
             self.startButton.setEnabled(False)
             self.stopButton.setEnabled(True)
@@ -399,6 +564,7 @@ class MainWindow(QMainWindow):
             if self.model is not None:
                 self.inferenceTimer.start()
                 self.inferenceLogLabel.setText("Inference active — waiting for first window...")
+                self.policyStatusLabel.setText("Policy: active, monitoring...")
 
         except Exception as e:
             try:
@@ -435,6 +601,9 @@ class MainWindow(QMainWindow):
         self.inferenceTimer.stop()
         self.refreshCounts()
 
+        self.policyStatusLabel.setText("Policy: inactive")
+        self.consecutiveLowWindows = 0
+
         self.capture = None
         self.sessionId = None
         self.sessionStartedAt = None
@@ -463,7 +632,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(640, 480)
+    window.resize(640, 580)
     window.show()
     sys.exit(app.exec())
 

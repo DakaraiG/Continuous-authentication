@@ -6,7 +6,7 @@
 #   - improved feature set for better discrimination
 #   - typing burst detection
 #   - better hold time estimation
-#   - mouse trajectory features (direction changes, acceleration)
+#   - mouse trajectory features
 #   - activity filtering for training
 
 import numpy as np
@@ -87,7 +87,6 @@ def extractKeyboardFeatures(keyEvents):
         features["iki75th"] = 0.0
 
     # hold durations - match each down to the nearest following up
-    # this is still approximate in privacy mode but better than before
     holdDurations = []
     usedUps = set()
 
@@ -200,7 +199,7 @@ def extractMouseFeatures(mouseEvents, windowDuration=10.0):
             dist = np.sqrt(dx**2 + dy**2)
             distances.append(dist)
 
-            # movement angle (direction)
+            # movement angle
             if dist > 0.01:  # avoid division by zero on tiny moves
                 angle = np.arctan2(dy, dx)
                 angles.append(angle)

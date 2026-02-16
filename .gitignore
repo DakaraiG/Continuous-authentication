@@ -12,3 +12,6 @@ __pycache__/capture.cpython-314.pyc
 models/model.pkl
 mdodels/
 venv/
+model.pkl
+__pycache__/features.cpython-311.pyc
+__pycache__/train_model.cpython-311.pyc

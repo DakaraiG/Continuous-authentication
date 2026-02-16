@@ -83,9 +83,7 @@ class OneClassModel:
     Wraps a one-class classifier with proper score calibration.
     Trains on enrolled user data only and flags anomalies.
     
-    The key improvement here is better score normalisation - we use
-    the full training distribution rather than just percentiles so
-    the confidence scores are more meaningful.
+    The predict_proba method returns calibrated scores in the 0-1 range, where higher means more likely to be the enrolled user.
     """
     def __init__(self, modelType="iforest"):
         self.modelType = modelType
