@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         # model
         self.model = None
         self.modelMetrics = None
+        self.modelFilePath = None  # tracks where the model was last saved/loaded
 
         # policy engine handles all threshold logic and alerts
         self.policy = PolicyEngine()
@@ -280,20 +281,22 @@ class MainWindow(QMainWindow):
                 f"Trained: {modelType} | AUC: {rocAuc:.3f} | EER: {eer:.3f}"
             )
 
-        # if this was an adaptation, prompt to save
+        # if this was an adaptation, auto-save silently
         if metrics.get("adapted", False):
-            self.policyStatusLabel.setText(
-                "Policy: ✓ Model adapted to include confirmed behaviour"
-            )
-            reply = QMessageBox.question(
-                self, "Model Adapted",
-                "The model has been retrained to include your recently confirmed behaviour.\n\n"
-                "Would you like to save the updated model now?\n"
-                "(If you don't save, the adaptation will be lost when you close the app)",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.saveModelToFile()
+            if self.modelFilePath:
+                try:
+                    saveModel(self.model, self.modelMetrics, self.modelFilePath)
+                    self.policyStatusLabel.setText(
+                        "Policy: Model adapted and saved automatically"
+                    )
+                except Exception as e:
+                    self.policyStatusLabel.setText(
+                        f"Policy: Model adapted (auto-save failed: {e})"
+                    )
+            else:
+                self.policyStatusLabel.setText(
+                    "Policy: Model adapted (save manually to keep changes)"
+                )
         else:
             QMessageBox.information(self, "Training complete",
                 f"Model trained successfully!\n\nType: {modelType}\nMode: {mode}\n\n"
@@ -309,6 +312,7 @@ class MainWindow(QMainWindow):
             return
         try:
             saveModel(self.model, self.modelMetrics, filePath)
+            self.modelFilePath = filePath
             QMessageBox.information(self, "Saved", f"Model saved to {filePath}")
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
@@ -323,6 +327,7 @@ class MainWindow(QMainWindow):
             model, metrics, featureNames = loadModel(filePath)
             self.model = model
             self.modelMetrics = metrics
+            self.modelFilePath = filePath
             self.saveModelButton.setEnabled(True)
 
             modelType = metrics.get("modelType", "Unknown")
@@ -390,7 +395,7 @@ class MainWindow(QMainWindow):
                 )
 
                 if confirmed:
-                    self.policyStatusLabel.setText("Policy: ✓ Identity confirmed by user")
+                    self.policyStatusLabel.setText("Policy: Identity confirmed by user")
 
                     # trigger adaptation if needed
                     if self.policy.shouldAdapt():
@@ -405,7 +410,7 @@ class MainWindow(QMainWindow):
                             self.trainingFinished,
                         )
                 else:
-                    self.policyStatusLabel.setText("Policy: ⚠ Alert dismissed, monitoring continues")
+                    self.policyStatusLabel.setText("Policy: Alert dismissed, monitoring continues")
 
         except Exception as e:
             self.inferenceLogLabel.setText(f"Inference error: {e}")
@@ -421,15 +426,15 @@ class MainWindow(QMainWindow):
         if policyState == "accepted":
             colour = "#4CAF50"
             self.policyStatusLabel.setText(
-                f"Policy: ✓ User accepted (score {confidence:.0f}% ≥ {acceptThreshold}%)")
+                f"Policy: User accepted (score {confidence:.0f}% >= {acceptThreshold}%)")
         elif policyState == "warning":
             colour = "#FF9800"
             self.policyStatusLabel.setText(
-                f"Policy: ⚠ Elevated monitoring (score {confidence:.0f}%)")
+                f"Policy: Elevated monitoring (score {confidence:.0f}%)")
         else:
             colour = "#F44336"
             self.policyStatusLabel.setText(
-                f"Policy: 🚨 Suspicious ({self.policy.consecutiveLowWindows}/{maxConsecutive} low windows)")
+                f"Policy: SUSPICIOUS ({self.policy.consecutiveLowWindows}/{maxConsecutive} low windows)")
 
         self.confidenceBar.setStyleSheet(
             f"QProgressBar::chunk {{ background-color: {colour}; }}")

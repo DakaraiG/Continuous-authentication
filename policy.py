@@ -32,7 +32,7 @@ class StepUpDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        warningLabel = QLabel("⚠️ Unusual activity detected")
+        warningLabel = QLabel("Unusual activity detected")
         warningLabel.setStyleSheet("font-size: 18px; font-weight: bold; color: #F44336;")
         warningLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(warningLabel)
@@ -54,8 +54,10 @@ class StepUpDialog(QDialog):
         self.dismissButton = buttonBox.addButton(
             "Dismiss", QDialogButtonBox.ButtonRole.RejectRole
         )
-        buttonBox.accepted.connect(self.accept)
-        buttonBox.rejected.connect(self.reject)
+        # connect buttons directly to avoid PyQt6 signal quirk with
+        # AcceptRole/RejectRole that can require multiple clicks
+        self.confirmButton.clicked.connect(self.accept)
+        self.dismissButton.clicked.connect(self.reject)
         layout.addWidget(buttonBox)
 
 

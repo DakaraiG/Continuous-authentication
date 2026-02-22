@@ -55,7 +55,7 @@ def main():
     result = subprocess.run(cmd)
 
     if result.returncode == 0:
-        print("\n✓ Build successful!")
+        print("\nBuild successful!")
         if system == "Windows":
             print("  Output: dist/ContinuousAuth/ContinuousAuth.exe")
         elif system == "Darwin":
