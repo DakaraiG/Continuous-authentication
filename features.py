@@ -77,6 +77,20 @@ def extractKeyboardFeatures(keyEvents):
         # percentiles give a better picture of the distribution shape
         features["iki25th"] = np.percentile(intervals, 25)
         features["iki75th"] = np.percentile(intervals, 75)
+
+        # skewness and kurtosis capture whether timing is lopsided or peaky
+        if len(intervals) >= 3:
+            mu = np.mean(intervals)
+            std = np.std(intervals)
+            if std > 1e-10:
+                features["ikiSkewness"] = np.mean(((intervals - mu) / std) ** 3)
+                features["ikiKurtosis"] = np.mean(((intervals - mu) / std) ** 4) - 3
+            else:
+                features["ikiSkewness"] = 0.0
+                features["ikiKurtosis"] = 0.0
+        else:
+            features["ikiSkewness"] = 0.0
+            features["ikiKurtosis"] = 0.0
     else:
         features["ikiMean"] = 0.0
         features["ikiStd"] = 0.0
@@ -85,6 +99,8 @@ def extractKeyboardFeatures(keyEvents):
         features["ikiMedian"] = 0.0
         features["iki25th"] = 0.0
         features["iki75th"] = 0.0
+        features["ikiSkewness"] = 0.0
+        features["ikiKurtosis"] = 0.0
 
     # hold durations - match each down to the nearest following up
     holdDurations = []
@@ -111,12 +127,16 @@ def extractKeyboardFeatures(keyEvents):
         features["holdMin"] = np.min(holdDurations)
         features["holdMax"] = np.max(holdDurations)
         features["holdMedian"] = np.median(holdDurations)
+        features["hold25th"] = np.percentile(holdDurations, 25)
+        features["hold75th"] = np.percentile(holdDurations, 75)
     else:
         features["holdMean"] = 0.0
         features["holdStd"] = 0.0
         features["holdMin"] = 0.0
         features["holdMax"] = 0.0
         features["holdMedian"] = 0.0
+        features["hold25th"] = 0.0
+        features["hold75th"] = 0.0
 
     # typing burst analysis
     # a "burst" is a sequence of keypresses with short intervals (<0.5s)
@@ -166,6 +186,26 @@ def extractKeyboardFeatures(keyEvents):
             features["typingRate"] = 0.0
     else:
         features["typingRate"] = 0.0
+
+    # key overlap ratio - fraction of keypresses where the next key is pressed
+    # before the previous key is released. fast typists overlap a lot, slow typists don't.
+    # detected purely from timing order of down/up events, no key identity needed.
+    if len(downs) > 0:
+        allKeyEvents = sorted(
+            [(e[0], "down") for e in downs] + [(e[0], "up") for e in ups]
+        )
+        heldCount = 0
+        overlapCount = 0
+        for _, evType in allKeyEvents:
+            if evType == "down":
+                if heldCount > 0:
+                    overlapCount += 1
+                heldCount += 1
+            else:
+                heldCount = max(0, heldCount - 1)
+        features["overlapRatio"] = overlapCount / len(downs)
+    else:
+        features["overlapRatio"] = 0.0
 
     return features
 
@@ -222,6 +262,14 @@ def extractMouseFeatures(mouseEvents, windowDuration=10.0):
         features["mouseDistMean"] = np.mean(distances)
         features["mouseDistStd"] = np.std(distances)
 
+        # path efficiency - ratio of net displacement to total path length
+        # 1.0 = perfectly straight line, lower = curved/wandering movement
+        netDx = sum(m[2] or 0.0 for m in moves)
+        netDy = sum(m[3] or 0.0 for m in moves)
+        netDisplacement = np.sqrt(netDx**2 + netDy**2)
+        totalDist = features["totalMouseDist"]
+        features["pathEfficiency"] = netDisplacement / totalDist if totalDist > 0 else 0.0
+
         if len(speeds) > 0:
             features["mouseSpeedMean"] = np.mean(speeds)
             features["mouseSpeedStd"] = np.std(speeds)
@@ -259,6 +307,7 @@ def extractMouseFeatures(mouseEvents, windowDuration=10.0):
         features["totalMouseDist"] = 0.0
         features["mouseDistMean"] = 0.0
         features["mouseDistStd"] = 0.0
+        features["pathEfficiency"] = 0.0
         features["mouseSpeedMean"] = 0.0
         features["mouseSpeedStd"] = 0.0
         features["mouseSpeedMax"] = 0.0
@@ -294,6 +343,35 @@ def extractMouseFeatures(mouseEvents, windowDuration=10.0):
     else:
         features["clickIntervalMean"] = 0.0
         features["clickIntervalStd"] = 0.0
+
+    # left vs right click ratio - some people are right-click-heavy, others rarely right-click
+    if len(clicks) > 0:
+        leftClicks = sum(1 for e in clicks if "left" in str(e[4]).lower())
+        features["leftClickRatio"] = leftClicks / len(clicks)
+    else:
+        features["leftClickRatio"] = 0.5  # neutral default
+
+    # pre-click deceleration - do they slow down as they approach a click target?
+    # compare mean speed in the 0.25s before a click vs the 0.25s before that
+    decelerations = []
+    for clickTs in [e[0] for e in clicks]:
+        preMoves = [m for m in moves if clickTs - 0.5 <= m[0] < clickTs]
+        if len(preMoves) < 4:
+            continue
+        preSpeeds = []
+        for i in range(1, len(preMoves)):
+            dt = preMoves[i][0] - preMoves[i-1][0]
+            if dt > 0:
+                dx = preMoves[i][2] or 0.0
+                dy = preMoves[i][3] or 0.0
+                preSpeeds.append(np.sqrt(dx**2 + dy**2) / dt)
+        if len(preSpeeds) >= 2:
+            mid = len(preSpeeds) // 2
+            earlySpeed = np.mean(preSpeeds[:mid])
+            lateSpeed = np.mean(preSpeeds[mid:])
+            if earlySpeed > 0:
+                decelerations.append((earlySpeed - lateSpeed) / earlySpeed)
+    features["preClickDecel"] = np.mean(decelerations) if decelerations else 0.0
 
     return features
 
@@ -417,19 +495,21 @@ FEATURE_NAMES = [
     # keyboard timing
     "keyPressCount", "keyReleaseCount",
     "ikiMean", "ikiStd", "ikiMin", "ikiMax", "ikiMedian", "iki25th", "iki75th",
-    "holdMean", "holdStd", "holdMin", "holdMax", "holdMedian",
+    "ikiSkewness", "ikiKurtosis",
+    "holdMean", "holdStd", "holdMin", "holdMax", "holdMedian", "hold25th", "hold75th",
     # typing patterns
     "burstCount", "burstLengthMean", "burstLengthStd", "burstDurationMean",
-    "typingRate",
+    "typingRate", "overlapRatio",
     # mouse movement
     "moveCount", "clickCount", "scrollCount",
-    "totalMouseDist", "mouseDistMean", "mouseDistStd",
+    "totalMouseDist", "mouseDistMean", "mouseDistStd", "pathEfficiency",
     "mouseSpeedMean", "mouseSpeedStd", "mouseSpeedMax", "mouseSpeedMedian",
     "mouseAccelMean", "mouseAccelStd",
     "directionChangeRate",
     # mouse interaction
     "scrollAmountMean", "scrollAmountStd", "scrollIntervalMean",
     "clickIntervalMean", "clickIntervalStd",
+    "leftClickRatio", "preClickDecel",
     # combined
     "idleRatio", "kbMouseRatio", "totalEvents",
 ]
