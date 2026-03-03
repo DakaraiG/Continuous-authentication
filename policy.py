@@ -12,10 +12,7 @@ import numpy as np
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QMessageBox
 from PyQt6.QtCore import Qt
 
-from train_model import (
-    buildOneClassDataset, buildBinaryDataset,
-    trainOneClass, trainBinary,
-)
+from train_model import buildOneClassDataset, trainOneClass
 
 
 class StepUpDialog(QDialog):
@@ -161,30 +158,16 @@ class PolicyEngine:
             mType = currentMetrics.get("modelType", "")
             if "SVM" in mType:
                 modelType = "ocsvm"
-            elif "Random Forest" in mType and currentMetrics.get("mode") == "binary":
-                modelType = "rf"
-            elif "Logistic" in mType:
-                modelType = "lr"
 
         def doAdapt():
             try:
-                if modelType in ("iforest", "ocsvm"):
-                    X = buildOneClassDataset(userLabel, dbPath)
-                    if X is None or len(X) < 5:
-                        trainingFinishedSignal.emit(
-                            "Adaptation failed: not enough data", None, None
-                        )
-                        return
-                    model, metrics = trainOneClass(X, modelType=modelType)
-                else:
-                    X, y = buildBinaryDataset(userLabel, dbPath)
-                    if X is None or len(np.unique(y)) < 2:
-                        trainingFinishedSignal.emit(
-                            "Adaptation failed: insufficient data", None, None
-                        )
-                        return
-                    model, metrics = trainBinary(X, y, modelType=modelType)
-
+                X = buildOneClassDataset(userLabel, dbPath)
+                if X is None or len(X) < 5:
+                    trainingFinishedSignal.emit(
+                        "Adaptation failed: not enough data", None, None
+                    )
+                    return
+                model, metrics = trainOneClass(X, modelType=modelType)
                 metrics["adapted"] = True
                 trainingFinishedSignal.emit("success", model, metrics)
 

@@ -5,8 +5,7 @@
 import time
 import pickle
 import threading
-import numpy as np
-
+import logging
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox, QMessageBox,
@@ -18,11 +17,13 @@ from db import Db
 from capture import GlobalCapture, CaptureConfig
 from features import extractWindowFeatures, featureDictToVector
 from train_model import (
-    buildOneClassDataset, buildBinaryDataset,
-    trainOneClass, trainBinary,
+    buildOneClassDataset, trainOneClass,
     saveModel, loadModel
 )
 from policy import PolicyEngine
+from logger import SessionLogger
+
+log = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -40,10 +41,14 @@ class MainWindow(QMainWindow):
         # model
         self.model = None
         self.modelMetrics = None
-        self.modelFilePath = None  # tracks where the model was last saved/loaded
 
         # policy engine handles all threshold logic and alerts
         self.policy = PolicyEngine()
+
+        # automatic CSV logger for external testing data collection
+        self.logger = SessionLogger()
+
+        log.info("Database opened, UI initialising")
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -71,6 +76,8 @@ class MainWindow(QMainWindow):
         self.inferenceTimer = QTimer()
         self.inferenceTimer.setInterval(10000)
         self.inferenceTimer.timeout.connect(self.runInference)
+
+        log.info("UI ready")
 
 
     # ---- UI BUILDING ----
@@ -212,34 +219,24 @@ class MainWindow(QMainWindow):
             return
 
         modelTypeData = self.modelTypeCombo.currentData()
+        log.info(f"Training requested: user={userLabel}, algorithm={modelTypeData}")
         self.trainButton.setEnabled(False)
         self.trainStatusLabel.setText("Training in progress... please wait")
 
         def doTraining():
             try:
-                if modelTypeData in ("iforest", "ocsvm"):
-                    X = buildOneClassDataset(userLabel, self.db.path.as_posix())
-                    if X is None or len(X) < 5:
-                        self.trainingFinished.emit(
-                            "Not enough data. Capture at least a few minutes of activity first.",
-                            None, None)
-                        return
-                    model, metrics = trainOneClass(X, modelType=modelTypeData)
-                else:
-                    X, y = buildBinaryDataset(userLabel, self.db.path.as_posix())
-                    if X is None or len(X) < 10:
-                        self.trainingFinished.emit(
-                            "Not enough data to train a binary model.", None, None)
-                        return
-                    if len(np.unique(y)) < 2:
-                        self.trainingFinished.emit(
-                            "Binary mode needs both enrolled and impostor data. "
-                            "Try one-class mode instead.", None, None)
-                        return
-                    model, metrics = trainBinary(X, y, modelType=modelTypeData)
-
+                X = buildOneClassDataset(userLabel, self.db.path.as_posix())
+                if X is None or len(X) < 5:
+                    self.trainingFinished.emit(
+                        "Not enough data. Capture at least a few minutes of activity first.",
+                        None, None)
+                    return
+                log.info(f"Training one-class model on {len(X)} windows")
+                model, metrics = trainOneClass(X, modelType=modelTypeData)
+                log.info(f"Training complete: {metrics}")
                 self.trainingFinished.emit("success", model, metrics)
             except Exception as e:
+                log.error(f"Training failed: {e}", exc_info=True)
                 self.trainingFinished.emit(f"Training failed: {e}", None, None)
 
         t = threading.Thread(target=doTraining, daemon=True)
@@ -266,37 +263,29 @@ class MainWindow(QMainWindow):
         modelType = metrics.get("modelType", "Unknown")
         mode = metrics.get("mode", "unknown")
 
-        if mode == "one-class":
-            windows = metrics.get("trainingWindows", 0)
-            scoreMean = metrics.get("trainScoreMean", 0)
-            inlierRate = metrics.get("inlierRate", 0)
-            self.trainStatusLabel.setText(
-                f"Trained: {modelType} | {windows} windows | "
-                f"avg score: {scoreMean:.2f} | inlier rate: {inlierRate*100:.0f}%"
-            )
-        else:
-            rocAuc = metrics.get("rocAuc", 0)
-            eer = metrics.get("eer", 0)
-            self.trainStatusLabel.setText(
-                f"Trained: {modelType} | AUC: {rocAuc:.3f} | EER: {eer:.3f}"
-            )
+        windows = metrics.get("trainingWindows", 0)
+        scoreMean = metrics.get("trainScoreMean", 0)
+        inlierRate = metrics.get("inlierRate", 0)
+        self.trainStatusLabel.setText(
+            f"Trained: {modelType} | {windows} windows | "
+            f"avg score: {scoreMean:.2f} | inlier rate: {inlierRate*100:.0f}%"
+        )
 
-        # if this was an adaptation, auto-save silently
+        # if this was an adaptation, prompt to save
         if metrics.get("adapted", False):
-            if self.modelFilePath:
-                try:
-                    saveModel(self.model, self.modelMetrics, self.modelFilePath)
-                    self.policyStatusLabel.setText(
-                        "Policy: Model adapted and saved automatically"
-                    )
-                except Exception as e:
-                    self.policyStatusLabel.setText(
-                        f"Policy: Model adapted (auto-save failed: {e})"
-                    )
-            else:
-                self.policyStatusLabel.setText(
-                    "Policy: Model adapted (save manually to keep changes)"
-                )
+            log.info("Model adapted after step-up confirmation")
+            self.policyStatusLabel.setText(
+                "Policy: Model adapted to include confirmed behaviour"
+            )
+            reply = QMessageBox.question(
+                self, "Model Adapted",
+                "The model has been retrained to include your recently confirmed behaviour.\n\n"
+                "Would you like to save the updated model now?\n"
+                "(If you don't save, the adaptation will be lost when you close the app)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.saveModelToFile()
         else:
             QMessageBox.information(self, "Training complete",
                 f"Model trained successfully!\n\nType: {modelType}\nMode: {mode}\n\n"
@@ -312,9 +301,10 @@ class MainWindow(QMainWindow):
             return
         try:
             saveModel(self.model, self.modelMetrics, filePath)
-            self.modelFilePath = filePath
+            log.info(f"Model saved to {filePath}")
             QMessageBox.information(self, "Saved", f"Model saved to {filePath}")
         except Exception as e:
+            log.error(f"Model save failed: {e}", exc_info=True)
             QMessageBox.critical(self, "Save failed", str(e))
 
 
@@ -327,13 +317,14 @@ class MainWindow(QMainWindow):
             model, metrics, featureNames = loadModel(filePath)
             self.model = model
             self.modelMetrics = metrics
-            self.modelFilePath = filePath
             self.saveModelButton.setEnabled(True)
 
             modelType = metrics.get("modelType", "Unknown")
             mode = metrics.get("mode", "unknown")
+            log.info(f"Model loaded from {filePath}: {modelType} ({mode})")
             self.trainStatusLabel.setText(f"Loaded: {modelType} ({mode} mode)")
         except Exception as e:
+            log.error(f"Model load failed: {e}", exc_info=True)
             QMessageBox.critical(self, "Load failed", str(e))
 
 
@@ -360,6 +351,7 @@ class MainWindow(QMainWindow):
                 self.confidenceLabel.setText("Confidence: — (not enough activity)")
                 self.inferenceLogLabel.setText(
                     f"Last check: {time.strftime('%H:%M:%S')} - skipped ({totalEvents} events)")
+                log.debug(f"Inference skipped: only {totalEvents} events in window")
                 return
 
             # run prediction
@@ -375,11 +367,32 @@ class MainWindow(QMainWindow):
             # evaluate against the policy
             policyState = self.policy.evaluate(confidence, acceptThreshold, challengeThreshold)
 
-            # log the event
+            log.debug(f"Inference: confidence={confidence:.1f}%, state={policyState}, events={totalEvents}")
+
+            # log the event to the database
             self.db.insertPolicyEvent(
                 self.sessionId, now, policyState, confidence / 100.0,
                 self.policy.consecutiveLowWindows,
                 acceptThreshold / 100.0, challengeThreshold / 100.0,
+            )
+
+            # get per-modality event counts for the CSV log
+            keyCount = featDict.get("keyPressCount", 0)
+            mouseCount = featDict.get("moveCount", 0) + featDict.get("clickCount", 0) + featDict.get("scrollCount", 0)
+
+            # log to CSV automatically
+            userLabel = self.userLabelInput.text().strip()
+            self.logger.logInference(
+                sessionId=self.sessionId,
+                userLabel=userLabel,
+                confidence=confidence,
+                policyState=policyState,
+                totalEvents=totalEvents,
+                keyEvents=keyCount,
+                mouseEvents=mouseCount,
+                consecutiveLow=self.policy.consecutiveLowWindows,
+                acceptThreshold=acceptThreshold,
+                challengeThreshold=challengeThreshold,
             )
 
             # update the UI
@@ -388,6 +401,12 @@ class MainWindow(QMainWindow):
 
             # check if we need to trigger a step-up alert
             if self.policy.shouldAlert(maxConsecutive):
+                log.warning(f"Step-up alert triggered: {self.policy.consecutiveLowWindows} consecutive low windows")
+                self.logger.logAlert(
+                    self.sessionId, userLabel, confidence,
+                    "alert_triggered", self.policy.consecutiveLowWindows,
+                )
+
                 confirmed = self.policy.showStepUpAlert(
                     confidence, self.sessionId, self.db,
                     acceptThreshold / 100.0, challengeThreshold / 100.0,
@@ -395,10 +414,16 @@ class MainWindow(QMainWindow):
                 )
 
                 if confirmed:
+                    log.info("Step-up alert: user confirmed identity")
+                    self.logger.logAlert(
+                        self.sessionId, userLabel, confidence,
+                        "alert_confirmed", 0,
+                    )
                     self.policyStatusLabel.setText("Policy: Identity confirmed by user")
 
                     # trigger adaptation if needed
                     if self.policy.shouldAdapt():
+                        log.info("Triggering model adaptation after confirmation")
                         self.policyStatusLabel.setText(
                             "Policy:Adapting model to confirmed behaviour...")
                         self.db.commit()
@@ -410,9 +435,15 @@ class MainWindow(QMainWindow):
                             self.trainingFinished,
                         )
                 else:
+                    log.info("Step-up alert: dismissed by user")
+                    self.logger.logAlert(
+                        self.sessionId, userLabel, confidence,
+                        "alert_dismissed", 0,
+                    )
                     self.policyStatusLabel.setText("Policy: Alert dismissed, monitoring continues")
 
         except Exception as e:
+            log.error(f"Inference error: {e}", exc_info=True)
             self.inferenceLogLabel.setText(f"Inference error: {e}")
             print(f"Inference error: {e}")
 
@@ -468,6 +499,11 @@ class MainWindow(QMainWindow):
 
             self.policy.reset()
 
+            # log session start
+            log.info(f"Capture started: session={self.sessionId}, user={userLabel}, "
+                     f"privacy={cfg.privacyMode}, keyboard={cfg.enableKeyboard}")
+            self.logger.logSessionStart(self.sessionId, userLabel)
+
             self.statusLabel.setText(f"Status: Capturing (session {self.sessionId})")
             self.startButton.setEnabled(False)
             self.stopButton.setEnabled(True)
@@ -480,6 +516,7 @@ class MainWindow(QMainWindow):
                 self.policyStatusLabel.setText("Policy: active, monitoring...")
 
         except Exception as e:
+            log.error(f"Capture failed to start: {e}", exc_info=True)
             try:
                 if self.capture:
                     self.capture.stop()
@@ -506,6 +543,12 @@ class MainWindow(QMainWindow):
             self.db.commit()
             self.db.endSession(self.sessionId, endedAt)
 
+            # log session end
+            userLabel = self.userLabelInput.text().strip()
+            duration = endedAt - self.sessionStartedAt if self.sessionStartedAt else 0
+            log.info(f"Capture stopped: session={self.sessionId}, duration={duration:.1f}s")
+            self.logger.logSessionEnd(self.sessionId, userLabel, duration)
+
         self.statusLabel.setText("Status: Idle (saved to auth_log.db)")
         self.startButton.setEnabled(True)
         self.stopButton.setEnabled(False)
@@ -531,6 +574,7 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):
+        log.info("Application closing")
         try:
             if self.capture:
                 self.capture.stop()

@@ -27,6 +27,8 @@ def main():
         "--hidden-import", "capture",
         "--hidden-import", "features",
         "--hidden-import", "train_model",
+        "--hidden-import", "app_log",
+        "--hidden-import", "logger",
         "--hidden-import", "sklearn.ensemble._forest",
         "--hidden-import", "sklearn.ensemble._iforest",
         "--hidden-import", "sklearn.svm._classes",
@@ -44,6 +46,8 @@ def main():
     if system == "Darwin":
         # macOS needs an Info.plist for permissions
         cmd += ["--osx-bundle-identifier", "com.continuousauth.app"]
+        # Quartz is imported conditionally in capture.py — pyinstaller won't detect it automatically
+        cmd += ["--hidden-import", "Quartz"]
 
     # add the main script
     cmd.append("main.py")

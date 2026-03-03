@@ -1,6 +1,5 @@
 # train_model.py
-# Trains authentication models for continuous auth
-# Supports one-class (enrolled user only) and binary (enrolled + impostor) modes
+# Trains authentication models for continuous auth (one-class mode only)
 #
 # v2 - better hyperparameters, training data filtering, improved score calibration
 
@@ -9,13 +8,8 @@ import numpy as np
 from pathlib import Path
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.svm import OneClassSVM, SVC
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_curve, auc, confusion_matrix
-from sklearn.model_selection import StratifiedKFold
-from sklearn.pipeline import Pipeline
+from sklearn.ensemble import IsolationForest
+from sklearn.svm import OneClassSVM
 
 from features import extractAllFeatures, featureDictToVector, FEATURE_NAMES
 
@@ -48,34 +42,6 @@ def buildOneClassDataset(enrolledUser, dbPath="auth_log.db"):
     print(f"Dataset: {len(X)} usable enrolled windows")
     return X
 
-
-def buildBinaryDataset(enrolledUser, dbPath="auth_log.db"):
-    """
-    Build dataset for binary classification (needs enrolled + impostor data).
-    """
-    print(f"Extracting features for enrolled user: {enrolledUser}")
-    allData = extractAllFeatures(dbPath, minEvents=10)
-
-    if len(allData) == 0:
-        return None, None
-
-    X, y = [], []
-    enrolledCount, impostorCount = 0, 0
-
-    for userLabel, featDict in allData:
-        vec = featureDictToVector(featDict)
-        X.append(vec)
-        if userLabel.lower() == enrolledUser.lower():
-            y.append(1)
-            enrolledCount += 1
-        else:
-            y.append(0)
-            impostorCount += 1
-
-    X = np.array(X)
-    y = np.array(y)
-    print(f"Dataset: {enrolledCount} enrolled, {impostorCount} impostor windows")
-    return X, y
 
 
 class OneClassModel:
@@ -191,68 +157,6 @@ def trainOneClass(X, modelType="iforest"):
 
     return model, metrics
 
-
-def trainBinary(X, y, modelType="rf"):
-    """
-    Train a binary classifier with cross-validation.
-    Needs both enrolled and impostor data.
-    """
-    if modelType == "lr":
-        baseModel = LogisticRegression(max_iter=1000, random_state=42)
-        modelName = "Logistic Regression"
-    elif modelType == "svm":
-        baseModel = SVC(kernel="rbf", probability=False, random_state=42)
-        modelName = "SVM (RBF)"
-    else:
-        baseModel = RandomForestClassifier(n_estimators=100, random_state=42)
-        modelName = "Random Forest"
-
-    print(f"\nTraining {modelName} (binary mode)...")
-
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("classifier", CalibratedClassifierCV(baseModel, cv=3, method="sigmoid")),
-    ])
-
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    allProbs = np.zeros(len(y))
-    allPreds = np.zeros(len(y))
-
-    for foldIdx, (trainIdx, testIdx) in enumerate(skf.split(X, y)):
-        xTrain, xTest = X[trainIdx], X[testIdx]
-        yTrain, yTest = y[trainIdx], y[testIdx]
-        pipeline.fit(xTrain, yTrain)
-        allProbs[testIdx] = pipeline.predict_proba(xTest)[:, 1]
-        allPreds[testIdx] = pipeline.predict(xTest)
-
-    fpr, tpr, thresholds = roc_curve(y, allProbs)
-    rocAuc = auc(fpr, tpr)
-
-    fnr = 1 - tpr
-    eerIdx = np.nanargmin(np.abs(fnr - fpr))
-    eer = (fpr[eerIdx] + fnr[eerIdx]) / 2
-    eerThreshold = thresholds[eerIdx]
-
-    cm = confusion_matrix(y, allPreds)
-
-    print(f"  ROC-AUC: {rocAuc:.4f}")
-    print(f"  EER: {eer:.4f}")
-
-    pipeline.fit(X, y)
-
-    metrics = {
-        "modelType": modelName,
-        "mode": "binary",
-        "rocAuc": rocAuc,
-        "eer": eer,
-        "eerThreshold": eerThreshold,
-        "fpr": fpr.tolist(),
-        "tpr": tpr.tolist(),
-        "thresholds": thresholds.tolist(),
-        "confusionMatrix": cm.tolist(),
-    }
-
-    return pipeline, metrics
 
 
 def saveModel(model, metrics, outputPath="model.pkl"):

@@ -7,3 +7,13 @@ venv/
 __pycache__/
 *.pyc
 .vscode/
+model.pkl
+__pycache__/features.cpython-311.pyc
+__pycache__/train_model.cpython-311.pyc
+log.log
+session_log.csv
+__pycache__/app_log.cpython-311.pyc
+__pycache__/logger.cpython-311.pyc
+__pycache__/policy.cpython-311.pyc
+.gitignore
+__pycache__/window.cpython-311.pyc
