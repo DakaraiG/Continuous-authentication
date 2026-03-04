@@ -6,6 +6,13 @@ import time
 import pickle
 import threading
 import logging
+import sys
+from pathlib import Path
+
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox, QMessageBox,
@@ -15,7 +22,7 @@ from PyQt6.QtCore import QTimer, pyqtSignal
 
 from db import Db
 from capture import GlobalCapture, CaptureConfig
-from features import extractWindowFeatures, featureDictToVector
+from features import extractWindowFeatures, featureDictToVector, FEATURE_NAMES
 from train_model import (
     buildOneClassDataset, trainOneClass,
     saveModel, loadModel
@@ -33,7 +40,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Continuous Auth")
 
-        self.db = Db()
+        self.db = Db(str(BASE_DIR / "auth_log.db"))
         self.sessionId = None
         self.capture = None
         self.sessionStartedAt = None
@@ -41,12 +48,13 @@ class MainWindow(QMainWindow):
         # model
         self.model = None
         self.modelMetrics = None
+        self.modelFeatureNames = None
 
         # policy engine handles all threshold logic and alerts
         self.policy = PolicyEngine()
 
         # automatic CSV logger for external testing data collection
-        self.logger = SessionLogger()
+        self.logger = SessionLogger(BASE_DIR)
 
         log.info("Database opened, UI initialising")
 
@@ -257,6 +265,7 @@ class MainWindow(QMainWindow):
 
         self.model = model
         self.modelMetrics = metrics
+        self.modelFeatureNames = FEATURE_NAMES
         self.saveModelButton.setEnabled(True)
 
         # update the training status label
@@ -317,6 +326,7 @@ class MainWindow(QMainWindow):
             model, metrics, featureNames = loadModel(filePath)
             self.model = model
             self.modelMetrics = metrics
+            self.modelFeatureNames = featureNames
             self.saveModelButton.setEnabled(True)
 
             modelType = metrics.get("modelType", "Unknown")
@@ -355,7 +365,7 @@ class MainWindow(QMainWindow):
                 return
 
             # run prediction
-            featureVec = featureDictToVector(featDict).reshape(1, -1)
+            featureVec = featureDictToVector(featDict, self.modelFeatureNames).reshape(1, -1)
             prob = self.model.predict_proba(featureVec)[0][1]
             confidence = prob * 100
 

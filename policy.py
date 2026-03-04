@@ -5,14 +5,47 @@
 # - step-up alert dialog
 # - model adaptation after user confirmation
 
+import sys
 import time
 import threading
 import numpy as np
 
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QMessageBox
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QMessageBox, QApplication
 from PyQt6.QtCore import Qt
 
 from train_model import buildOneClassDataset, trainOneClass
+
+
+def _flashTaskbar(hwnd):
+    """Flash the Windows taskbar button to grab user attention."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        FLASHW_ALL = 0x00000003        # flash both title bar and taskbar button
+        FLASHW_TIMERNOFG = 0x0000000C  # keep flashing until the window comes to foreground
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize",   ctypes.wintypes.UINT),
+                ("hwnd",     ctypes.wintypes.HANDLE),
+                ("dwFlags",  ctypes.wintypes.DWORD),
+                ("uCount",   ctypes.wintypes.UINT),
+                ("dwTimeout",ctypes.wintypes.DWORD),
+            ]
+
+        info = FLASHWINFO(
+            cbSize=ctypes.sizeof(FLASHWINFO),
+            hwnd=hwnd,
+            dwFlags=FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount=8,
+            dwTimeout=0,
+        )
+        ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
 
 
 class StepUpDialog(QDialog):
@@ -26,6 +59,8 @@ class StepUpDialog(QDialog):
         self.setWindowTitle("Identity Verification Required")
         self.setModal(True)
         self.setMinimumWidth(400)
+        # Stay on top so the dialog isn't buried behind other windows
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
         layout = QVBoxLayout(self)
 
@@ -56,6 +91,16 @@ class StepUpDialog(QDialog):
         self.confirmButton.clicked.connect(self.accept)
         self.dismissButton.clicked.connect(self.reject)
         layout.addWidget(buttonBox)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Play the system alert sound
+        QApplication.beep()
+        # Force the window to the front and give it keyboard focus
+        self.raise_()
+        self.activateWindow()
+        # Flash the Windows taskbar button so the user notices even if minimised
+        _flashTaskbar(int(self.winId()))
 
 
 class PolicyEngine:

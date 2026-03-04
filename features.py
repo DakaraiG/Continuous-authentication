@@ -515,9 +515,11 @@ FEATURE_NAMES = [
 ]
 
 
-def featureDictToVector(featureDict):
+def featureDictToVector(featureDict, featureNames=None):
     """Convert a feature dict into a numpy array in the right order."""
-    return np.array([featureDict.get(name, 0.0) for name in FEATURE_NAMES])
+    if featureNames is None:
+        featureNames = FEATURE_NAMES
+    return np.array([featureDict.get(name, 0.0) for name in featureNames])
 
 
 if __name__ == "__main__":
