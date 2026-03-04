@@ -2,7 +2,10 @@
 # Entry point
 
 import faulthandler, sys, traceback, logging
-faulthandler.enable(all_threads=True)
+
+# In windowed (no-console) builds sys.stderr/stdout are None; redirect faulthandler to a file
+_faultlog = open("fault.log", "w")
+faulthandler.enable(file=_faultlog, all_threads=True)
 
 def logCrash(excType, exc, tb):
     logging.critical("Unhandled exception", exc_info=(excType, exc, tb))

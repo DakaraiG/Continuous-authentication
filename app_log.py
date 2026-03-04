@@ -29,15 +29,16 @@ def setupLogging(logDir=None):
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
 
-    # console handler - only warnings and above so it doesnt spam the terminal
-    consoleHandler = logging.StreamHandler(sys.stdout)
-    consoleHandler.setLevel(logging.WARNING)
-    consoleHandler.setFormatter(logging.Formatter(
-        "[%(levelname)s] %(message)s"
-    ))
-
     logger.addHandler(fileHandler)
-    logger.addHandler(consoleHandler)
+
+    # Only add console handler when stdout exists (not in windowed/no-console builds)
+    if sys.stdout is not None:
+        consoleHandler = logging.StreamHandler(sys.stdout)
+        consoleHandler.setLevel(logging.WARNING)
+        consoleHandler.setFormatter(logging.Formatter(
+            "[%(levelname)s] %(message)s"
+        ))
+        logger.addHandler(consoleHandler)
 
     logging.info("Application started")
     logging.info(f"Python {sys.version}")
