@@ -8,14 +8,23 @@
 import subprocess
 import sys
 import platform
+import plistlib
+import os
+
+# Python 3.11 is used for macOS builds — it has stable PyInstaller support
+# and all dependencies (numpy, sklearn, PyQt6, pynput) pre-installed.
+# Python 3.14 has known PyInstaller compatibility issues with numpy bundling.
+PYTHON_MACOS = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
 
 def main():
     system = platform.system()
     print(f"Building for {system}...")
 
+    python = PYTHON_MACOS if system == "Darwin" else sys.executable
+
     # base pyinstaller command
     cmd = [
-        sys.executable, "-m", "PyInstaller",
+        python, "-m", "PyInstaller",
         "--name", "ContinuousAuth",
         "--windowed",           # no console window (GUI app)
         "--noconfirm",          # overwrite previous build without asking
@@ -41,13 +50,16 @@ def main():
         "--hidden-import", "pynput.mouse._darwin",
         # collect sklearn metadata that pyinstaller needs
         "--collect-submodules", "sklearn",
+        # numpy 2.x requires full collection (binaries + data) to avoid
+        # "PyCapsule_Import could not import module datetime" crash
+        "--collect-all", "numpy",
     ]
 
     if system == "Darwin":
         # macOS needs an Info.plist for permissions
         cmd += ["--osx-bundle-identifier", "com.continuousauth.app"]
         # Quartz is imported conditionally in capture.py — pyinstaller won't detect it automatically
-        cmd += ["--hidden-import", "Quartz"]
+        cmd += ["--hidden-import", "Quartz", "--hidden-import", "_datetime"]
 
     # add the main script
     cmd.append("main.py")
@@ -57,6 +69,33 @@ def main():
     print()
 
     result = subprocess.run(cmd)
+
+    if result.returncode == 0 and system == "Darwin":
+        # Patch Info.plist with required privacy usage descriptions.
+        # Without these, macOS silently kills the app on launch when it tries
+        # to monitor keyboard/mouse input via pynput.
+        plist_path = "dist/ContinuousAuth.app/Contents/Info.plist"
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+        plist["NSAccessibilityUsageDescription"] = (
+            "ContinuousAuth needs Accessibility access to monitor mouse movements "
+            "and clicks for continuous authentication."
+        )
+        plist["NSInputMonitoringUsageDescription"] = (
+            "ContinuousAuth needs Input Monitoring access to track typing patterns "
+            "for continuous authentication."
+        )
+        with open(plist_path, "wb") as f:
+            plistlib.dump(plist, f)
+        print("  Patched Info.plist with privacy usage descriptions.")
+
+        # Re-sign with ad-hoc identity after patching Info.plist,
+        # otherwise macOS rejects the bundle due to invalid signature.
+        subprocess.run([
+            "codesign", "--deep", "--force", "--sign", "-",
+            "dist/ContinuousAuth.app"
+        ], check=True)
+        print("  Re-signed app bundle.")
 
     if result.returncode == 0:
         print("\nBuild successful!")

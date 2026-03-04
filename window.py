@@ -31,7 +31,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Continuous Auth – Capture, Train & Inference")
+        self.setWindowTitle("Continuous Auth")
 
         self.db = Db()
         self.sessionId = None

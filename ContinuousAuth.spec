@@ -1,50 +1,29 @@
-# ContinuousAuth.spec
-# PyInstaller spec file for the Continuous Auth app
-# You can use this instead of build.py if you need more control:
-#   pyinstaller ContinuousAuth.spec
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all
 
-import sys
-import platform
+datas = []
+binaries = []
+hiddenimports = ['window', 'policy', 'db', 'capture', 'features', 'train_model', 'app_log', 'logger', 'sklearn.ensemble._forest', 'sklearn.ensemble._iforest', 'sklearn.svm._classes', 'sklearn.utils._typedefs', 'sklearn.neighbors._partition_nodes', 'sklearn.tree._utils', 'pynput.keyboard._win32', 'pynput.mouse._win32', 'pynput.keyboard._darwin', 'pynput.mouse._darwin', 'Quartz', '_datetime']
+hiddenimports += collect_submodules('sklearn')
+tmp_ret = collect_all('numpy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
-        'window',
-        'policy',
-        'db',
-        'capture',
-        'features',
-        'train_model',
-        'sklearn.ensemble._forest',
-        'sklearn.ensemble._iforest',
-        'sklearn.svm._classes',
-        'sklearn.utils._typedefs',
-        'sklearn.neighbors._partition_nodes',
-        'sklearn.tree._utils',
-        'sklearn.calibration',
-        'sklearn.preprocessing._data',
-        'pynput.keyboard._win32',
-        'pynput.mouse._win32',
-        'pynput.keyboard._darwin',
-        'pynput.mouse._darwin',
-    ],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'matplotlib',    # not needed at runtime, only for evaluation
-        'pandas',        # not needed at runtime
-        'tkinter',
-    ],
+    excludes=[],
     noarchive=False,
+    optimize=0,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -56,9 +35,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,   # GUI app, no terminal window
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
 )
-
 coll = COLLECT(
     exe,
     a.binaries,
@@ -68,15 +51,9 @@ coll = COLLECT(
     upx_exclude=[],
     name='ContinuousAuth',
 )
-
-# macOS .app bundle
-if platform.system() == 'Darwin':
-    app = BUNDLE(
-        coll,
-        name='ContinuousAuth.app',
-        bundle_identifier='com.continuousauth.app',
-        info_plist={
-            'NSAppleEventsUsageDescription': 'ContinuousAuth needs accessibility access to monitor keyboard and mouse input.',
-            'NSAccessibilityUsageDescription': 'ContinuousAuth needs accessibility access to monitor keyboard and mouse input for behavioural authentication.',
-        },
-    )
+app = BUNDLE(
+    coll,
+    name='ContinuousAuth.app',
+    icon=None,
+    bundle_identifier='com.continuousauth.app',
+)
